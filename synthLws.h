@@ -17,6 +17,97 @@
 // NON usa lws_mcu_poll() dell'header perché gestiamo 2 porte e CMD estesi.
 // Usa solo le utility lws_send_frame() e lws_next_seq() dell'header.
 // =========================================================================
+#include "synthPreset.h"
+
+// -------------------------------------------------------------------------
+// PRESET ENTRY HANDLER — chiamato per ogni K-V del preset
+// -------------------------------------------------------------------------
+// La voce corrente è presetVoice (globale 0..4). Il target è già
+// filtrato a monte: se non è nostro, non arriviamo qui.
+// -------------------------------------------------------------------------
+static void synthA_presetEntry(uint8_t key, uint8_t len, const uint8_t* value) {
+    int v = voiceToLocal(presetVoice);
+    if (v < 0) return;   // sicurezza: non è per noi
+
+    switch (key) {
+        // ---------- uint8 ----------
+        case K_MODE:          if (len>=1) { mode_loc[v]=presetRd8(value); wavetable_setup_voce(v); } break;
+        case K_WAVEFORM:      if (len>=1) { waveform_loc[v][0]=presetRd8(value); wavetable_setup_voce(v); } break;
+        case K_SUB1_WAVEFORM: if (len>=1) { waveform_loc[v][1]=presetRd8(value); wavetable_setup_voce(v); } break;
+        case K_FM_SELECT:     if (len>=1) fmSel_loc[v]       = presetRd8(value); break;
+        case K_OTTAVA:        if (len>=1) { ottava_loc[v]=presetRd8(value); setOttava_loc(v, ottava_loc[v]); } break;
+        case K_ATTENUA:       if (len>=1) attenua_loc[v]     = presetRd8(value); break;
+        case K_TRACKING:      if (len>=1) trackingLev_loc[v] = presetRd8(value); break;
+        case K_DETUNE:        if (len>=1) { detune_loc[v]=presetRd8(value);
+                                            detuneFlo_loc[v]=(float)detune_loc[v]/90.0f; } break;
+        case K_TEMPO_SLIDE:   if (len>=1) { tempoSlide_loc[v]=presetRd8(value); updateGlideStep(v); } break;
+        case K_VCF_WAVE:      if (len>=1) vcfWave_loc[v]     = presetRd8(value); break;
+        case K_VCF_LFO_LEV:   if (len>=1) lfoVcfLev_loc[v]   = presetRd8(value); break;
+        case K_VCF_LFO_RATE:  if (len>=1) speedVcfLfo_loc[v] = presetRd8(value); break;
+        case K_VCF_LFO_SYNC:  if (len>=1) lfoVcf1Syn_loc[v]  = presetRd8(value); break;
+        case K_VCF_MULTI:     if (len>=1) lfoVcfMulti_loc[v] = presetRd8(value); break;
+        case K_VCF_START:     if (len>=1) lfoVcfLev2B_loc[v] = presetRd8(value); break;
+        case K_BEND_UP:       if (len>=1) bendMaxUp_loc[v]   = presetRd8(value); break;
+        case K_BEND_DOWN:     if (len>=1) bendMaxDown_loc[v] = presetRd8(value); break;
+        case K_SEND_BEND:     if (len>=1) sendBend_loc[v]    = presetRd8(value); break;
+        case K_SEND_MOD:      if (len>=1) sendMod_loc[v]     = presetRd8(value); break;
+        case K_SLIDE:         if (len>=1) { slide_loc[v]=presetRd8(value); updateGlideStep(v); } break;
+        case K_LFO_MOD_SYNC:  if (len>=1) lfoMod2Syn_loc[v]  = presetRd8(value); break;
+        case K_DSP:           if (len>=1) dspNum_loc[v]      = presetRd8(value); break;
+        case K_ARP_ON:        if (len>=1) { arp_on_loc[v]=presetRd8(value);
+                                            if (!arp_on_loc[v]) { arp_step_loc[v]=0; arp_octave_loc[v]=0; } } break;
+        case K_ARP_MODE:      if (len>=1) arp_mode_loc[v]    = presetRd8(value); break;
+        case K_ARP_MULTI:     if (len>=1) arp_multi_loc[v]   = presetRd8(value); break;
+        case K_ARP_OCTAVES:   if (len>=1) arp_octaves_loc[v] = presetRd8(value); break;
+        case K_GATER_ON:      if (len>=1) { gater_on_loc[v]=presetRd8(value);
+                                            if (!gater_on_loc[v]) gater_step_loc[v]=0; } break;
+        case K_GATER_NUM:     if (len>=1) gater_num_loc[v]   = presetRd8(value); break;
+        case K_GATE_MULTI:    if (len>=1) gater_multi_loc[v] = presetRd8(value); break;
+        case K_GATE_LUNG:     if (len>=1) gater_lung_loc[v]  = presetRd8(value); break;
+        case K_CONTA_OFFSET:  if (len>=1) contaOffset_loc[v] = presetRd8(value); break;
+        case K_MIDI_CH:       if (len>=1) midiCh_loc[v]      = presetRd8(value); break;
+        case K_NOTA_SPLIT:    if (len>=1) notaSplit_loc[v]   = presetRd8(value); break;
+        case K_MIDI_MODE:     if (len>=1) midiMode_loc[v]    = presetRd8(value); break;
+        case K_SUB1_LEVEL:    if (len>=1) sub_level_idx[v]   = presetRd8(value); break;
+        case K_VOICE_VOL:     if (len>=1) voiceVol_idx[v]    = presetRd8(value); break;
+        case K_ADSR_A:        if (len>=1) adsr_a_loc[v] = presetRd8(value); break;
+        case K_ADSR_D:        if (len>=1) adsr_d_loc[v] = presetRd8(value); break;
+        case K_ADSR_S:        if (len>=1) adsr_s_loc[v] = presetRd8(value); break;
+        case K_ADSR_R:        if (len>=1) adsr_r_loc[v] = presetRd8(value); break;
+
+        // ---------- uint16 ----------
+        case K_SUB1_INTERVAL: if (len>=2) {
+                                  int16_t x=(int16_t)presetRd16(value);
+                                  x=constrain(x,-24,24);
+                                  sub_interval[v]=x;
+                              } break;
+        case K_MOD_IN_B:      if (len>=2) modInB_loc[v]  = presetRd16(value); break;
+        case K_MOD_LEV:       if (len>=2) {
+                                  modLev_loc[v]  = presetRd16(value);
+                                  modLevA_loc[v] = modLev_loc[v] - (modLev_loc[v]*2);
+                              } break;
+        case K_PITCH_LEV:     if (len>=2) {
+                                  modPitchLev_loc[v]  = presetRd16(value);
+                                  modPitchLevA_loc[v] = modPitchLev_loc[v] - (modPitchLev_loc[v]*2);
+                              } break;
+
+        // ---------- uint32 ----------
+        case K_LFO_RATE:      if (len>=4) speedMod_loc[v]      = presetRd32(value); break;
+        case K_PITCH_RATE:    if (len>=4) speedPitchMod_loc[v] = presetRd32(value); break;
+
+        // ---------- FM operator (globali chip) ----------
+        case K_FM_SIN_0:      if (len>=2) fmSetSin[fmSel_loc[v]][0] = (float)(int16_t)presetRd16(value)/100.0f; break;
+        case K_FM_SIN_1:      if (len>=2) fmSetSin[fmSel_loc[v]][1] = (float)(int16_t)presetRd16(value)/100.0f; break;
+        case K_FM_SIN_2:      if (len>=2) fmSetSin[fmSel_loc[v]][2] = (float)(int16_t)presetRd16(value)/100.0f; break;
+        case K_FM_DIV_0:      if (len>=2) fmSetDiv[fmSel_loc[v]][0] = presetRd16(value); break;
+        case K_FM_DIV_1:      if (len>=2) fmSetDiv[fmSel_loc[v]][1] = presetRd16(value); break;
+        case K_FM_DIV_2:      if (len>=2) fmSetDiv[fmSel_loc[v]][2] = presetRd16(value); break;
+
+        default:
+            // Chiave sconosciuta: ignora silenziosamente (compatibilità avanti)
+            break;
+    }
+}
 
 // -------------------------------------------------------------------------
 // 1. UTILITY DI ROUTING
@@ -442,6 +533,56 @@ static void dispatchLocal(const LwsFrame& f) {
             if (f.len >= 3)
                 on_midi_cc_v(f.data[0], f.data[1], f.data[2]);
             break;
+        // ---------- PRESET TRANSFER ----------
+        case CMD_PRESET_BEGIN:
+            if (f.len >= 5) {
+                uint8_t voice = f.data[1];
+                uint8_t id    = f.data[2];
+                uint16_t len  = (uint16_t)f.data[3] | ((uint16_t)f.data[4] << 8);
+                uint8_t status;
+                if (len > PRESET_MAX_LEN) {
+                    status = PRESET_ACK_LEN_FAIL;
+                } else {
+                    presetBegin(voice, id, len);
+                    status = PRESET_ACK_OK;
+                }
+                uint8_t ack[3] = { f.data[0], voice, status };
+                lws_send_frame(LWS_PORT_UP, MCU_ID, lws_next_seq(),
+                               CMD_PRESET_ACK, ack, 3);
+                LWS_DEBUG.printf("[%c] preset BEGIN voice=%u len=%u -> %u\n",
+                                 MCU_ID, voice, len, status);
+            }
+            break;
+
+        case CMD_PRESET_CHUNK:
+            if (f.len >= 5) {
+                uint8_t voice = f.data[1];
+                uint16_t off  = (uint16_t)f.data[2] | ((uint16_t)f.data[3] << 8);
+                uint8_t dlen  = f.len - 4;
+                presetChunk(voice, off, &f.data[4], dlen);
+            }
+            break;
+
+        case CMD_PRESET_END:
+            if (f.len >= 3) {
+                uint8_t voice = f.data[1];
+                uint8_t crc   = f.data[2];
+                uint8_t st    = presetEnd(voice, crc);
+                if (st == PRESET_ACK_OK) {
+                    uint8_t rc = presetApply(synthA_presetEntry);
+                    if (rc != 0) st = rc;
+                }
+                uint8_t ack[3] = { f.data[0], voice, st };
+                lws_send_frame(LWS_PORT_UP, MCU_ID, lws_next_seq(),
+                               CMD_PRESET_ACK, ack, 3);
+                LWS_DEBUG.printf("[%c] preset END voice=%u -> %u\n",
+                                 MCU_ID, voice, st);
+            }
+            break;
+
+        case CMD_PRESET_READ:
+            // (fase 2: dump del preset corrente)
+            break;			
 
         case CMD_ERROR: {
             char msg[64] = {0};
