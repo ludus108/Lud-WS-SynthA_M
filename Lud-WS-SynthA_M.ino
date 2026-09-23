@@ -1,5 +1,5 @@
 // =====================================================================
-// Lud-WS-SynthA_M — RP2040 synth a 1 voce (+2 sub_voci), nodo LWS
+// Lud-WS-SynthA_M — RP2350 synth a 1 voce (+2 sub_voci), nodo LWS
 // =====================================================================
 // REV 1 (LWS integration)
 //
@@ -108,7 +108,7 @@ const float levArr[21] = {
 };
 
 // --- Costanti globali ---
-const float masterFreq    = 4.0f;
+const float masterFreq    = PWM_CLKDIV_BASE;
 const float f0            = 30.0f;
 float       calb          = 6.58f;
 const float sampleLev     = 551.0f;

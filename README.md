@@ -1,10 +1,8 @@
 \# Lud-WS-SynthA\_M
 
+V 0.1.1
 
-
-V 0.1.0
-
-
+mcu RP2350
 
 master voce 1 di 5 poly analog synth
 
