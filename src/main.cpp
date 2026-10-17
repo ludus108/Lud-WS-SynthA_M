@@ -272,8 +272,8 @@ void setup() {
 
     // --- LWS callbacks ---
     lws_set_callbacks(on_param, on_error);
-    lws_set_synth_callbacks(on_param_voce, on_param_i32, on_param_i32_voce,
-                            on_midi_note_v, on_midi_bend_v, on_midi_cc_v);
+   /*  lws_set_synth_callbacks(on_param_voce, on_param_i32, on_param_i32_voce,
+                            on_midi_note_v, on_midi_bend_v, on_midi_cc_v); */
 
     // --- Motore audio ---
     pinMode(OUTPUT_ON_PIN, OUTPUT);

@@ -25,6 +25,10 @@
 // La voce corrente è presetVoice (globale 0..4). Il target è già
 // filtrato a monte: se non è nostro, non arriviamo qui.
 // -------------------------------------------------------------------------
+// Forward declaration (Arduino IDE la generava automaticamente)
+static inline int voiceToLocal(uint8_t vGlobal);
+// Variabile di stato per la calibrazione (era nel .ino originale)
+static int calibraNota = -1;
 static void synthA_presetEntry(uint8_t key, uint8_t len, const uint8_t* value) {
     int v = voiceToLocal(presetVoice);
     if (v < 0) return;   // sicurezza: non è per noi
@@ -74,6 +78,14 @@ static void synthA_presetEntry(uint8_t key, uint8_t len, const uint8_t* value) {
         case K_ADSR_D:        if (len>=1) adsr_d_loc[v] = presetRd8(value); break;
         case K_ADSR_S:        if (len>=1) adsr_s_loc[v] = presetRd8(value); break;
         case K_ADSR_R:        if (len>=1) adsr_r_loc[v] = presetRd8(value); break;
+
+        default: break;
+    }   // ← chiude il primo switch (uint8)
+
+    // =====================================================================
+    // Secondo switch: parametri non-uint8 (uint16, uint32, FM operator)
+    // =====================================================================
+    switch (key) {
 
         // ---------- uint16 ----------
         case K_SUB1_INTERVAL: if (len>=2) {
