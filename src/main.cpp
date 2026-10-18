@@ -5,15 +5,7 @@
 //
 // ARCHITETTURA
 // ---------------------------------------------------------------------
-//   Display ── 1 Mbps ──▶ Router ── 115200 ──▶ [a] SynthA_M (1 voce)
-//                                                  │
-//                                                  │ Serial1 1 Mbps
-//                                                  ▼
-//                                              [b] SynthA_V_A (2 voci)
-//                                                  │
-//                                                  │ Serial2 1 Mbps
-//                                                  ▼
-//                                              [c] SynthA_V_B (2 voci)
+//   Display ── 1 Mbps ──▶ Router ── 115200 ──▶ [a] SynthA_M (voce 1) ──▶ [b] SynthA_V (voci 2 e 3) ──▶ [c] SynthA_V2 (voci 4 e 5).
 //
 // VOCI:
 //   'a' → voce globale 0 (VOCE_BASE=0, NUM_VOCI=1)
@@ -51,7 +43,7 @@
 // ---------------------------------------------------------------------
 // Cambia questa riga (o passala come -D) per compilare i tre chip.
 #ifndef MCU_ID
-  #define MCU_ID 'a'          // 'a'=Master, 'b'=V_A, 'c'=V_B
+  #define MCU_ID 'a'          // 'a'=Master (questo), 'b'=SynthA_V, 'c'=SynthA_V2
 #endif
 
 // ---------------------------------------------------------------------
@@ -253,7 +245,6 @@ float intervalMul[49] = {};
 #include "synthEngine.h"    // IRQ, wavetable, ADSR, note stack, freq
 #include "synthControl.h"   // LFO tick, arp, gater per-voce
 #include "synthLws.h"       // callback LWS, bridge, poly broadcast
-
 // ---------------------------------------------------------------------
 // 4. SETUP
 // ---------------------------------------------------------------------
@@ -356,6 +347,10 @@ void loop() {
     // --- LWS: poll delle due porte ---
     pollRouter();       // synthLws.h
     pollChain();        // synthLws.h
+if (Serial.available()) {
+    char c = Serial.read();
+    if (c == '?') dumpStatus();
+}
 
     // --- LWS: retry pending ACK (sulla porta UP) ---
     // NB: l'header usa LWS_SERIAL (definita come LWS_PORT_UP in config).

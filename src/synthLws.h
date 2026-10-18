@@ -8,11 +8,12 @@
 // synthLws.h — Layer LWS: callback, bridge, Poly broadcast
 // =========================================================================
 // Contiene:
-//   - utility di routing (ownerOfVoice, voiceToLocal)
-//   - dispatch per CMD (param, param_voce, i32, midi)
+//   - utility di routing (ownerOfVoice, voiceToLocal, frameVoiceGlobal)
+//   - dispatch per CMD (param, param_voce, i32, midi, preset)
 //   - bridge Router <-> Chain
 //   - Poly broadcast (solo Master 'a')
 //   - pollRouter / pollChain
+//   - tracking passivo "last seen" per dumpStatus (no heartbeat attivo)
 //
 // NON usa lws_mcu_poll() dell'header perché gestiamo 2 porte e CMD estesi.
 // Usa solo le utility lws_send_frame() e lws_next_seq() dell'header.
@@ -29,6 +30,24 @@
 static inline int voiceToLocal(uint8_t vGlobal);
 // Variabile di stato per la calibrazione (era nel .ino originale)
 static int calibraNota = -1;
+// Contatori per dumpStatus
+static uint32_t g_frameFromRouter = 0;
+static uint32_t g_frameFromChain  = 0;
+static uint32_t g_pongSent        = 0;
+static uint32_t g_presetApplied   = 0;
+
+// --- Tracking passivo "last seen": aggiornato SOLO in ricezione ---
+// Zero traffico generato. Serve solo a dumpStatus() per diagnostica.
+// Indice = MCU_ID - 'a'  →  0='a', 1='b', 2='c'
+static uint32_t g_lastSeen_ms[3] = {0, 0, 0};
+
+static inline void trackDownstream(uint8_t senderId) {
+    int idx = (int)senderId - (int)'a';
+    if (idx >= 0 && idx < 3) g_lastSeen_ms[idx] = millis();
+}
+
+static void dumpStatus();
+
 static void synthA_presetEntry(uint8_t key, uint8_t len, const uint8_t* value) {
     int v = voiceToLocal(presetVoice);
     if (v < 0) return;   // sicurezza: non è per noi
@@ -141,27 +160,52 @@ static inline int voiceToLocal(uint8_t vGlobal) {
 // -------------------------------------------------------------------------
 // 2. CLASSIFICAZIONE FRAME
 // -------------------------------------------------------------------------
-// I CMD che hanno "target" nel primo byte del payload.
-static inline bool frameHasTargetField(uint8_t cmd) {
+
+// Estrae la voce globale (0..4) o -1 se il CMD non ha campo voice.
+//
+// MIDI_V è DUAL-FORMAT (auto-rilevato da f.len) per compatibilità con
+// Display/Router che possono usare la convenzione "target-first":
+//   voice-first  (interno SynthA): [voice][dati...]        NOTE=4 BEND=5 CC=3
+//   target-first (Display/Router): [target][voice][dati...] NOTE=5 BEND=6 CC=4
+// Le due lunghezze sono sempre distinte, quindi non c'è ambiguità.
+static inline int frameVoiceGlobal(const LwsFrame& f) {
+    switch ((char)f.cmd) {
+        // --- target in data[0], voice in data[1] ---
+        case CMD_PARAM_VOCE:
+        case CMD_PARAM_I32_V:
+        case CMD_PRESET_BEGIN:
+        case CMD_PRESET_CHUNK:
+        case CMD_PRESET_END:
+            if (f.len < 2) return -1;
+            return (int)f.data[1];
+
+        // --- MIDI_V: dual-format ---
+        case CMD_MIDI_NOTE_V:
+            if (f.len == 4) return (int)f.data[0];   // voice-first
+            if (f.len == 5) return (int)f.data[1];   // target-first
+            return -1;
+        case CMD_MIDI_BEND_V:
+            if (f.len == 5) return (int)f.data[0];   // voice-first
+            if (f.len == 6) return (int)f.data[1];   // target-first
+            return -1;
+        case CMD_MIDI_CC_V:
+            if (f.len == 3) return (int)f.data[0];   // voice-first
+            if (f.len == 4) return (int)f.data[1];   // target-first
+            return -1;
+
+        default:
+            return -1;
+    }
+}
+
+// CMD con target globale (no voice): PING, PARAM, PARAM_REL, PARAM_I32.
+// Questi vengono instradati per data[0] (Fase 2 di handleFrameFromRouter).
+static inline bool frameIsGlobalTargeted(uint8_t cmd) {
     switch ((char)cmd) {
         case CMD_PING:
         case CMD_PARAM:
         case CMD_PARAM_REL:
-        case CMD_PARAM_VOCE:
-        case CMD_PARAM_I32:
-        case CMD_PARAM_I32_V:
-            return true;
-        default:
-            return false;
-    }
-}
-
-// I CMD che hanno "voice" nel primo byte del payload.
-static inline bool frameHasVoiceField(uint8_t cmd) {
-    switch ((char)cmd) {
-        case CMD_MIDI_NOTE_V:
-        case CMD_MIDI_BEND_V:
-        case CMD_MIDI_CC_V:
+        case CMD_PARAM_I32:      // i32 globale (calibrazione)
             return true;
         default:
             return false;
@@ -169,6 +213,7 @@ static inline bool frameHasVoiceField(uint8_t cmd) {
 }
 
 // I CMD che sono "voice-specific" e in Poly vanno replicati.
+// (Non include CMD_PRESET_*: i preset viaggiano per-voce espliciti.)
 static inline bool frameIsVoiceSpecific(uint8_t cmd) {
     switch ((char)cmd) {
         case CMD_PARAM_VOCE:
@@ -200,9 +245,6 @@ static inline void sendToRouter(const LwsFrame& f) {
 // -------------------------------------------------------------------------
 // 4. CALLBACK APPLICATIVI — versione 1 (stub + parametri chiave)
 // -------------------------------------------------------------------------
-// Sono richiamati da dispatchLocal(). Per l'editing: qui si aggiungono
-// gli switch completi dei parametri (chiavi K_*). Per ora copriamo le
-// chiavi essenziali per il test end-to-end.
 
 static inline void on_param(char target, char key, uint8_t value) {
     if (target != MCU_ID) return;   // già filtrato a monte
@@ -216,7 +258,7 @@ static inline void on_param(char target, char key, uint8_t value) {
             LWS_DEBUG.printf("[a] synthMode=%u\n", synthMode);
             break;
 #endif
-              case K_PANIC:
+        case K_PANIC:
             // Applica localmente
             for (uint8_t v = 0; v < NUM_VOCI; v++) onAllNotesOff(v);
 
@@ -484,22 +526,116 @@ static inline void on_error(const char *msg) {
     LWS_DEBUG.printf("[%c] ERROR: %s\n", MCU_ID, msg);
 }
 
+// =========================================================================
+// dumpStatus() — stampa stato interno su seriale USB
+// =========================================================================
+static inline void dumpStatus() {
+    // ===== HEADER =====
+    Serial.println();
+    Serial.println("[DUMP] ========== SYNTHA STATUS ==========");
+    Serial.printf("[DUMP] mcu=%c num_voci=%d voce_base=%d\n",
+                  MCU_ID, NUM_VOCI, VOCE_BASE);
+    Serial.printf("[DUMP] uptime=%lu ms\n", millis());
+    Serial.printf("[DUMP] synthMode=%u presetSel=%u presetSave=%u\n",
+                  synthMode, presetSel, presetSave);
+
+    // ===== TRAFFIC =====
+    Serial.println("[DUMP] --- TRAFFIC ---");
+    Serial.printf("[DUMP] frame_from_router=%lu\n", g_frameFromRouter);
+    Serial.printf("[DUMP] frame_from_chain=%lu\n",  g_frameFromChain);
+    Serial.printf("[DUMP] pong_sent=%lu\n",         g_pongSent);
+    Serial.printf("[DUMP] preset_applied=%lu\n",    g_presetApplied);
+
+    // ===== PER VOICE =====
+    for (int v = 0; v < NUM_VOCI; v++) {
+        Serial.printf("[DUMP] --- VOICE %d (global %d) ---\n",
+                      v, v + VOCE_BASE);
+        Serial.printf("[DUMP]   mode=%u wf0=%u wf1=%u fmSel=%u\n",
+                      mode_loc[v], waveform_loc[v][0],
+                      waveform_loc[v][1], fmSel_loc[v]);
+        Serial.printf("[DUMP]   ottava=%u attenua=%u tracking=%u detune=%u tempoSlide=%u\n",
+                      ottava_loc[v], attenua_loc[v],
+                      trackingLev_loc[v], detune_loc[v], tempoSlide_loc[v]);
+        Serial.printf("[DUMP]   adsr A=%u D=%u S=%u R=%u\n",
+                      adsr_a_loc[v], adsr_d_loc[v],
+                      adsr_s_loc[v], adsr_r_loc[v]);
+        Serial.printf("[DUMP]   vol_idx=%u sub1_lvl_idx=%u sub1_int=%d\n",
+                      voiceVol_idx[v], sub_level_idx[v], sub_interval[v]);
+        Serial.printf("[DUMP]   vcf wave=%u lfoLev=%u lfoRate=%u sync=%u multi=%u start=%u\n",
+                      vcfWave_loc[v], lfoVcfLev_loc[v], speedVcfLfo_loc[v],
+                      lfoVcf1Syn_loc[v], lfoVcfMulti_loc[v], lfoVcfLev2B_loc[v]);
+        Serial.printf("[DUMP]   lfoRate=%lu pitchRate=%lu modInB=%d modLev=%d pitchLev=%d\n",
+                      speedMod_loc[v], speedPitchMod_loc[v],
+                      modInB_loc[v], modLev_loc[v], modPitchLev_loc[v]);
+        Serial.printf("[DUMP]   bendUp=%u bendDown=%u sendBend=%u sendMod=%u\n",
+                      bendMaxUp_loc[v], bendMaxDown_loc[v],
+                      sendBend_loc[v], sendMod_loc[v]);
+        Serial.printf("[DUMP]   slide=%u lfoModSync=%u dsp=%u\n",
+                      slide_loc[v], lfoMod2Syn_loc[v], dspNum_loc[v]);
+        Serial.printf("[DUMP]   arp on=%u mode=%u multi=%u oct=%u\n",
+                      arp_on_loc[v], arp_mode_loc[v],
+                      arp_multi_loc[v], arp_octaves_loc[v]);
+        Serial.printf("[DUMP]   gater on=%u num=%u multi=%u lung=%u\n",
+                      gater_on_loc[v], gater_num_loc[v],
+                      gater_multi_loc[v], gater_lung_loc[v]);
+        Serial.printf("[DUMP]   contaOffset=%u midiCh=%u notaSplit=%u midiMode=%u\n",
+                      contaOffset_loc[v], midiCh_loc[v],
+                      notaSplit_loc[v], midiMode_loc[v]);
+    }
+
+    // ===== FM OPERATORS =====
+    Serial.println("[DUMP] --- FM OPERATORS ---");
+    for (int p = 0; p < 8; p++) {
+        Serial.printf("[DUMP]   fm[%d] sin=%.2f,%.2f,%.2f div=%d,%d,%d\n",
+                      p,
+                      fmSetSin[p][0], fmSetSin[p][1], fmSetSin[p][2],
+                      fmSetDiv[p][0], fmSetDiv[p][1], fmSetDiv[p][2]);
+    }
+
+    // ===== CALIBRAZIONE =====
+    Serial.printf("[DUMP] calibraNota=%d\n", calibraNota);
+
+    // ===== CHAIN — last seen (passivo, no heartbeat) =====
+    Serial.println("[DUMP] --- CHAIN LAST-SEEN ---");
+    {
+        uint32_t nowms = millis();
+        for (int i = 0; i < 3; i++) {
+            char id = (char)('a' + i);
+            if (id == MCU_ID) continue;              // salta se stesso
+            if (g_lastSeen_ms[i] == 0) {
+                Serial.printf("[DUMP]   %c never seen\n", id);
+            } else {
+                Serial.printf("[DUMP]   %c last_seen=%lu ms ago\n",
+                              id, (unsigned long)(nowms - g_lastSeen_ms[i]));
+            }
+        }
+    }
+
+    // ===== FOOTER =====
+    Serial.println("[DUMP] ==========================================");
+    Serial.println();
+}
+
 // -------------------------------------------------------------------------
 // 5. DISPATCH LOCALE — chiamato quando un frame è destinato a noi
 // -------------------------------------------------------------------------
 static void dispatchLocal(const LwsFrame& f) {
     switch ((char)f.cmd) {
+        case CMD_PARAM:
+            if (f.len >= 3) {
+                if ((char)f.data[1] == '?') { dumpStatus(); break; }
+                on_param((char)f.data[0], (char)f.data[1], f.data[2]);
+            }
+            break;
+
         case CMD_PING:
             // [target_id] == MCU_ID -> PONG
             if (f.len >= 1 && (char)f.data[0] == MCU_ID) {
                 lws_send_frame(LWS_PORT_UP, MCU_ID, lws_next_seq(),
                                CMD_PONG, nullptr, 0);
+                g_pongSent++;
                 LWS_DEBUG.printf("[%c] PONG\n", MCU_ID);
             }
-            break;
-
-        case CMD_PARAM:
-            if (f.len >= 3) on_param((char)f.data[0], (char)f.data[1], f.data[2]);
             break;
 
         case CMD_PARAM_REL:
@@ -518,6 +654,7 @@ static void dispatchLocal(const LwsFrame& f) {
                               (char)f.data[2], f.data[3]);
             break;
 
+        // ---------- I32 (case aggiunti: prima mancavano) ----------
         case CMD_PARAM_I32:
             if (f.len >= 6)
                 on_param_i32((char)f.data[0], (char)f.data[1],
@@ -531,20 +668,28 @@ static void dispatchLocal(const LwsFrame& f) {
                                   lws_unpack_i32_le(&f.data[3]));
             break;
 
+        // ---------- MIDI_V (dual-format) ----------
         case CMD_MIDI_NOTE_V:
-            if (f.len >= 4)
+            if (f.len == 4)
                 on_midi_note_v(f.data[0], f.data[1], f.data[2], f.data[3]);
+            else if (f.len == 5)
+                on_midi_note_v(f.data[1], f.data[2], f.data[3], f.data[4]);
             break;
 
         case CMD_MIDI_BEND_V:
-            if (f.len >= 5)
+            if (f.len == 5)
                 on_midi_bend_v(f.data[0], lws_unpack_i32_le(&f.data[1]));
+            else if (f.len == 6)
+                on_midi_bend_v(f.data[1], lws_unpack_i32_le(&f.data[2]));
             break;
 
         case CMD_MIDI_CC_V:
-            if (f.len >= 3)
+            if (f.len == 3)
                 on_midi_cc_v(f.data[0], f.data[1], f.data[2]);
+            else if (f.len == 4)
+                on_midi_cc_v(f.data[1], f.data[2], f.data[3]);
             break;
+
         // ---------- PRESET TRANSFER ----------
         case CMD_PRESET_BEGIN:
             if (f.len >= 5) {
@@ -583,6 +728,7 @@ static void dispatchLocal(const LwsFrame& f) {
                 if (st == PRESET_ACK_OK) {
                     uint8_t rc = presetApply(synthA_presetEntry);
                     if (rc != 0) st = rc;
+                    else         g_presetApplied++;
                 }
                 uint8_t ack[3] = { f.data[0], voice, st };
                 lws_send_frame(LWS_PORT_UP, MCU_ID, lws_next_seq(),
@@ -594,7 +740,7 @@ static void dispatchLocal(const LwsFrame& f) {
 
         case CMD_PRESET_READ:
             // (fase 2: dump del preset corrente)
-            break;			
+            break;
 
         case CMD_ERROR: {
             char msg[64] = {0};
@@ -629,8 +775,10 @@ static void polyBroadcast(const LwsFrame& f) {
             // data = [target][voice][key][...]
             child.data[0] = (uint8_t)owner;
             child.data[1] = vg;
-        } else if (frameHasVoiceField(f.cmd)) {
-            // data = [voice][...]
+        } 
+		else if (f.cmd == CMD_MIDI_NOTE_V || f.cmd == CMD_MIDI_BEND_V ||
+                   f.cmd == CMD_MIDI_CC_V) {
+            // data = [voice][...]  (formato voice-first interno)
             child.data[0] = vg;
         }
         sendToChain(child);
@@ -643,45 +791,54 @@ static void polyBroadcast(const LwsFrame& f) {
 // 7. GESTIONE FRAME DAL ROUTER (UP -> DOWN)
 // -------------------------------------------------------------------------
 static void handleFrameFromRouter(const LwsFrame& f) {
-    // Fase 1: è un frame con target?
-    if (frameHasTargetField(f.cmd) && f.len >= 1) {
-        char target = (char)f.data[0];
-        if (target != MCU_ID) {
-            // Non è nostro: forward su Chain
-            sendToChain(f);
-            LWS_DEBUG.printf("[%c] relay UP->DOWN target=%c\n", MCU_ID, target);
-            return;
-        }
-    }
+    g_frameFromRouter++;
 
-    // Fase 2: è un frame con voice?
-    if (frameHasVoiceField(f.cmd) && f.len >= 1) {
-        uint8_t vg = f.data[0];
-        char owner = ownerOfVoice(vg);
+    // =====================================================================
+    // FASE 1 — VOICE-FIRST
+    // Qualsiasi CMD con campo voice viene instradato in base a
+    // ownerOfVoice(voice). Il campo target NON è usato come criterio
+    // primario (evita errori del Display e sblocca il forwarding preset).
+    // =====================================================================
+    int vg = frameVoiceGlobal(f);
+    if (vg >= 0) {
+        char owner = ownerOfVoice((uint8_t)vg);
+
         if (owner != MCU_ID) {
             // Non è nostra: forward su Chain
             sendToChain(f);
-            LWS_DEBUG.printf("[%c] relay UP->DOWN voice=%u\n", MCU_ID, vg);
+            LWS_DEBUG.printf("[%c] relay voice=%d cmd=%c -> DOWN\n",
+                             MCU_ID, vg, (char)f.cmd);
+            return;
+        }
+
+        // È nostra: applica localmente
+        dispatchLocal(f);
+
+        // Poly broadcast (solo Master, solo Poly mode, solo voce 0)
+#if MCU_ID == 'a'
+        if (synthMode == 0 && frameIsVoiceSpecific(f.cmd) && vg == 0) {
+            polyBroadcast(f);
+        }
+#endif
+        return;
+    }
+
+    // =====================================================================
+    // FASE 2 — TARGET GLOBALE (PING, PARAM, PARAM_REL, PARAM_I32)
+    // =====================================================================
+    if (frameIsGlobalTargeted(f.cmd) && f.len >= 1) {
+        if ((char)f.data[0] != MCU_ID) {
+            sendToChain(f);
+            LWS_DEBUG.printf("[%c] relay target=%c cmd=%c -> DOWN\n",
+                             MCU_ID, (char)f.data[0], (char)f.cmd);
             return;
         }
     }
 
-    // Fase 3: applica localmente
+    // =====================================================================
+    // FASE 3 — FALLBACK (ERROR, PONG, CMD non classificati)
+    // =====================================================================
     dispatchLocal(f);
-
-    // Fase 4: Poly broadcast (solo Master)
-#if MCU_ID == 'a'
-    if (synthMode == 0 && frameIsVoiceSpecific(f.cmd) && f.len >= 1) {
-        // Estrai la voice globale per capire se è la voce 0 (locale Master)
-        uint8_t vg = 0;
-        if (f.cmd == CMD_PARAM_VOCE || f.cmd == CMD_PARAM_I32_V) {
-            if (f.len >= 2) vg = f.data[1];
-        } else {
-            vg = f.data[0];
-        }
-        if (vg == 0) polyBroadcast(f);
-    }
-#endif
 }
 
 // -------------------------------------------------------------------------
@@ -691,6 +848,8 @@ static void handleFrameFromRouter(const LwsFrame& f) {
 // Il SENDER originale (b o c) viene preservato, quindi il Display vede
 // i nodi remoti come se fossero direttamente connessi.
 static void handleFrameFromChain(const LwsFrame& f) {
+    g_frameFromChain++;
+    trackDownstream(f.sender);            // tracking passivo per dumpStatus
     sendToRouter(f);
     LWS_DEBUG.printf("[%c] relay DOWN->UP sender=%c cmd=%c\n",
                      MCU_ID, (char)f.sender, (char)f.cmd);
